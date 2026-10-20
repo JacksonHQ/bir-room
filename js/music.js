@@ -1,202 +1,131 @@
-/* ============================================================
-   音频系统（无外部文件，全部实时合成）
-   - Env     ：环境声（时钟滴答 + 微风）—— 进入游戏即有，很淡
-   - Ambient ：lo-fi 背景乐（和弦垫 + 琶音 + 黑胶噪底）—— 点击唱片机才启动
-   - Birthday：生日快乐歌（音乐盒版）—— 礼物盒打开时才响起
-   - SFX     ：点击 / 出错 / 解锁 / 心意 / 钟声 / 吹气 / 猫叫 / 收进口袋 / 唱针落下
-   ============================================================ */
-(function () {
-  const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
-  const N = { G3:196, C4:261.63, E4:329.63, F4:349.23, G4:392, A4:440, B4:493.88,
-    C5:523.25, D5:587.33, E5:659.25, F5:698.46, G5:783.99, A5:880, C6:1046.5, E6:1318.5 };
+/* 生日小屋 · WebAudio 八音盒音乐（无外部资源） */
+(function(){
+const AC = window.AudioContext||window.webkitAudioContext;
+let ctx=null, master=null, verb=null;
+function ensure(){
+  if(!ctx){
+    ctx = new AC();
+    master = ctx.createGain(); master.gain.value=.8; master.connect(ctx.destination);
+    // 简易混响
+    verb = ctx.createConvolver();
+    const len=ctx.sampleRate*1.6, buf=ctx.createBuffer(2,len,ctx.sampleRate);
+    for(let c=0;c<2;c++){const d=buf.getChannelData(c);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/len,2.6)*.5;}
+    verb.buffer=buf;
+    const vg=ctx.createGain(); vg.gain.value=.35; verb.connect(vg); vg.connect(master);
+  }
+  if(ctx.state==='suspended')ctx.resume();
+  return ctx;
+}
+// 八音盒音符：正弦+泛音，快起长衰减
+function pluck(freq, t, vol, dur){
+  const o=ctx.createOscillator(), o2=ctx.createOscillator(), g=ctx.createGain();
+  o.type='sine'; o.frequency.value=freq;
+  o2.type='sine'; o2.frequency.value=freq*3.01;
+  const g2=ctx.createGain(); g2.gain.value=.18;
+  g.gain.setValueAtTime(0,t);
+  g.gain.linearRampToValueAtTime(vol,t+.008);
+  g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+  o.connect(g); o2.connect(g2); g2.connect(g);
+  g.connect(master); g.connect(verb);
+  o.start(t); o2.start(t); o.stop(t+dur+.1); o2.stop(t+dur+.1);
+}
+const NOTE = n => 440*Math.pow(2,(n-69)/12); // MIDI -> Hz
 
-  /* ---------- 生日快乐歌旋律（音乐盒） ---------- */
-  const MEL = [
-    ['G4',.75],['G4',.25],['A4',1],['G4',1],['C5',1],['B4',1.75],[null,.25],
-    ['G4',.75],['G4',.25],['A4',1],['G4',1],['D5',1],['C5',1.75],[null,.25],
-    ['G4',.75],['G4',.25],['G5',1],['E5',1],['C5',1],['B4',1],['A4',1.75],[null,.25],
-    ['F5',.75],['F5',.25],['E5',1],['C5',1],['D5',1],['C5',1.75],[null,1.25],
-  ];
-  const BASS = ['C4','G3','C4','F4'];
-  const ARP  = ['C5','E5','G5','C6'];
+/* ── 氛围音乐（小屋环境，循环） ── */
+let ambTimer=null, ambOn=false;
+const AMB = {
+  // 每步 = 八分音符；旋律用 MIDI 音高，null 为休止
+  tempo: 258, // ms per step
+  // C 大调欢快小循环（I–V–IV–V），跳音动机
+  melody: [79,84,79,84, 76,null,72,null, 74,79,74,79, 83,null,79,null,
+           77,84,77,84, 81,null,77,null, 79,83,79,74, 72,null,76,null,
+           72,76,79,76, 84,null,79,null, 74,79,83,79, 81,null,79,null,
+           77,81,84,81, 79,null,77,null, 74,79,83,79, 72,null,null,null],
+  bass:   [48,null,48,null, 55,null,55,null, 53,null,53,null, 55,null,55,null,
+           48,null,48,null, 55,null,55,null, 53,null,53,null, 55,null,55,null]
+};
+function ambStep(){
+  if(!ambOn)return;
+  const t=ctx.currentTime+.05;
+  const i=ambI%AMB.melody.length;
+  if(AMB.melody[i]!=null)pluck(NOTE(AMB.melody[i]),t,.16,2.2);
+  const bi=ambI%AMB.bass.length;
+  if(AMB.bass[bi]!=null)pluck(NOTE(AMB.bass[bi]),t,.10,3.2);
+  ambI++;
+}
+let ambI=0;
+function startAmbient(){
+  ensure();
+  if(ambOn)return; ambOn=true;
+  ambStep(); ambTimer=setInterval(ambStep,AMB.tempo);
+}
+function stopAmbient(){ ambOn=false; clearInterval(ambTimer); }
 
-  /* ---------- 唱片机启动小旋律（一段轻快的八音盒乐句，让用户明确感知"点了才有声"） ---------- */
-  const PLAYER_INTRO = [
-    ['E5',.3],['G5',.3],['E5',.3],['C5',.3],['D5',.45],[null,.15],
-    ['G4',.3],['B4',.3],['D5',.3],['G5',.45],[null,.15],
-  ];
+/* ── 生日快乐歌（八音盒纯音乐，柔和循环） ── */
+let songTimer=null, songOn=false;
+// Happy Birthday in C: 5 5 6 5 1 7 | 5 5 6 5 2 1 | 5 5 5(hi) 3 1 7 6 | 4 4 3 1 2 1
+const SONG=[
+  [67,.5],[67,.25],[69,.75],[67,.75],[72,.75],[71,1],
+  [67,.5],[67,.25],[69,.75],[67,.75],[74,.75],[72,1],
+  [67,.5],[67,.25],[79,.75],[76,.75],[72,.75],[71,1],[74,.5],
+  [74,.5],[74,.25],[76,.75],[72,.75],[74,.75],[72,1.25],[0,.75]
+];
+function scheduleSong(){
+  if(!songOn)return;
+  let t=ctx.currentTime+.12;
+  const beat=.72; // 慢一点更温柔
+  SONG.forEach(([n,d])=>{
+    if(n>0){
+      pluck(NOTE(n),t,.16,d*beat*3.2);      // 主音：轻、长衰减
+      pluck(NOTE(n+12),t,.035,d*beat*2.6); // 高八度：极轻泛光
+      pluck(NOTE(n-12),t,.05,d*beat*3.2);  // 低八度：柔和垫底
+    }
+    t+=d*beat;
+  });
+  // 唱完稍停，无缝循环
+  songTimer=setTimeout(scheduleSong,(t-ctx.currentTime)*1000+900);
+}
+function playSong(onend){
+  ensure();
+  if(songOn){stopSong();return true;}
+  songOn=true; scheduleSong();
+  return true;
+}
+function stopSong(){ songOn=false; clearTimeout(songTimer); }
+function isSongPlaying(){return songOn;}
 
-  /* ---------- lo-fi 氛围和弦进行 ---------- */
-  const CHORDS = [
-    [48,52,55,59], [45,48,52,55], [41,45,48,52], [43,47,50,55],
-  ];
+/* ── 音符按钮音效 ── */
+function noteTone(which){
+  ensure();
+  const map={do:60,mi:64,sol:67};
+  const m=map[which]||60, t=ctx.currentTime;
+  pluck(NOTE(m),t,.3,1.6); pluck(NOTE(m+12),t,.1,1.2);
+}
 
-  const AudioBox = {
-    ctx:null, master:null, muted:false,
-    envOn:false, ambientOn:false, birthdayOn:false,
-    aTimer:null, bTimer:null, tickTimer:null, windSrc:null,
-    aNext:0, bNext:0, aStep:0, bStep:0, aChord:0,
-    beat:.5, bright:false,
-    vinyl:null,
+/* ── 小音效 ── */
+function ding(){ ensure(); const t=ctx.currentTime; pluck(NOTE(88),t,.22,1.2); pluck(NOTE(93),t+.09,.18,1.4); }
+function unlockChime(){ ensure(); const t=ctx.currentTime; [72,76,79,84].forEach((n,i)=>pluck(NOTE(n),t+i*.12,.2,1.6)); }
+function clickSfx(){ ensure(); const t=ctx.currentTime; pluck(NOTE(84),t,.12,.5); }
+function errSfx(){ ensure(); const t=ctx.currentTime; pluck(NOTE(64),t,.15,.6); pluck(NOTE(59),t+.12,.15,.8); }
+function blowSfx(){ ensure(); const t=ctx.currentTime;
+  const b=ctx.createBufferSource(),buf=ctx.createBuffer(1,ctx.sampleRate*.6,ctx.sampleRate),d=buf.getChannelData(0);
+  for(let i=0;i<d.length;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/d.length,1.5)*.5;
+  b.buffer=buf; const f=ctx.createBiquadFilter(); f.type='bandpass'; f.frequency.value=800; f.Q.value=.7;
+  const g=ctx.createGain(); g.gain.value=.35; b.connect(f);f.connect(g);g.connect(master);b.start(t);
+}
+// 小猫「喵」：滑音合成
+function meowSfx(){ ensure(); const t=ctx.currentTime;
+  const o=ctx.createOscillator(), g=ctx.createGain();
+  o.type='sine';
+  o.frequency.setValueAtTime(520,t);
+  o.frequency.linearRampToValueAtTime(900,t+.15);
+  o.frequency.linearRampToValueAtTime(420,t+.45);
+  g.gain.setValueAtTime(0,t);
+  g.gain.linearRampToValueAtTime(.2,t+.05);
+  g.gain.exponentialRampToValueAtTime(.0001,t+.5);
+  o.connect(g); g.connect(master); g.connect(verb);
+  o.start(t); o.stop(t+.55);
+}
 
-    ensure(){
-      if (this.ctx) return;
-      const AC = window.AudioContext || window.webkitAudioContext;
-      this.ctx = new AC();
-      this.master = this.ctx.createGain();
-      this.master.gain.value = this.muted ? 0 : .9;
-      this.master.connect(this.ctx.destination);
-    },
-    now(){ this.ensure(); return this.ctx.currentTime; },
-    setMuted(m){ this.muted = m; if (this.master) this.master.gain.value = m ? 0 : .9; },
-
-    /* 基础音色 */
-    tone(f, t, dur, vol=.15, type='triangle', dest, glideTo){
-      const o = this.ctx.createOscillator(), g = this.ctx.createGain();
-      o.type = type; o.frequency.setValueAtTime(f, t);
-      if (glideTo) o.frequency.linearRampToValueAtTime(glideTo, t + dur);
-      g.gain.setValueAtTime(0, t);
-      g.gain.linearRampToValueAtTime(vol, t + .014);
-      g.gain.exponentialRampToValueAtTime(.0001, t + dur);
-      o.connect(g); g.connect(dest || this.master);
-      o.start(t); o.stop(t + dur + .06);
-    },
-    padNote(midi, t, dur, vol){
-      const f = mtof(midi);
-      const flt = this.ctx.createBiquadFilter();
-      flt.type = 'lowpass'; flt.frequency.value = 780; flt.Q.value = .4;
-      const g = this.ctx.createGain();
-      g.gain.setValueAtTime(0, t);
-      g.gain.linearRampToValueAtTime(vol, t + dur * .35);
-      g.gain.linearRampToValueAtTime(0, t + dur);
-      flt.connect(g); g.connect(this.master);
-      [-6, 5].forEach(cents => {
-        const o = this.ctx.createOscillator();
-        o.type = 'triangle'; o.frequency.value = f; o.detune.value = cents;
-        o.connect(flt); o.start(t); o.stop(t + dur + .1);
-      });
-    },
-    noiseBurst(t, dur, vol=.2, freq=900){
-      const len = this.ctx.sampleRate * dur, buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
-      const d = buf.getChannelData(0);
-      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
-      const src = this.ctx.createBufferSource(); src.buffer = buf;
-      const flt = this.ctx.createBiquadFilter(); flt.type = 'lowpass'; flt.frequency.value = freq;
-      const g = this.ctx.createGain(); g.gain.value = vol;
-      src.connect(flt); flt.connect(g); g.connect(this.master); src.start(t);
-    },
-
-    /* ---------- 环境声（进入游戏即播放，很淡） ---------- */
-    startEnv(){
-      this.ensure(); this.ctx.resume();
-      if (this.envOn) return;
-      this.envOn = true;
-      // 微风：循环白噪声 + 低通
-      const len = this.ctx.sampleRate * 3, buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
-      const d = buf.getChannelData(0);
-      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * .3;
-      this.windSrc = this.ctx.createBufferSource(); this.windSrc.buffer = buf; this.windSrc.loop = true;
-      const flt = this.ctx.createBiquadFilter(); flt.type = 'lowpass'; flt.frequency.value = 420;
-      const g = this.ctx.createGain(); g.gain.value = .018;
-      this.windSrc.connect(flt); flt.connect(g); g.connect(this.master);
-      this.windSrc.start();
-      // 时钟滴答：每 1.1 秒一声
-      this.tickTimer = setInterval(() => {
-        const t = this.now();
-        this.tone(2200, t, .03, .025, 'square');
-        this.noiseBurst(t, .02, .012, 3000);
-      }, 1100);
-    },
-
-    /* ---------- lo-fi 背景乐（点击唱片机才启动） ---------- */
-    startAmbient(){
-      this.ensure(); this.ctx.resume();
-      if (this.ambientOn) return;
-      this.ambientOn = true; this.aNext = this.ctx.currentTime + .6; this.aStep = 0;
-      // 唱针落下的噪声 + 黑胶噪底
-      const t0 = this.ctx.currentTime;
-      this.noiseBurst(t0, .35, .18, 1800);
-      const len = this.ctx.sampleRate * 2, buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
-      const d = buf.getChannelData(0);
-      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * .5;
-      this.vinyl = this.ctx.createBufferSource(); this.vinyl.buffer = buf; this.vinyl.loop = true;
-      const flt = this.ctx.createBiquadFilter(); flt.type = 'lowpass'; flt.frequency.value = 3200;
-      const g = this.ctx.createGain(); g.gain.value = .014;
-      this.vinyl.connect(flt); flt.connect(g); g.connect(this.master);
-      this.vinyl.start();
-      // 唱片机启动乐句（让用户明确感知"点了才有声"）
-      let pt = t0 + .25;
-      PLAYER_INTRO.forEach(([n, b]) => {
-        if (n) this.tone(N[n], pt, b * 1.7, .12, 'sine');
-        pt += b * .42;
-      });
-      this.aTimer = setInterval(() => this.scheduleAmbient(), 300);
-      this.scheduleAmbient();
-    },
-    scheduleAmbient(){
-      const BAR = 4.2;
-      while (this.aNext < this.ctx.currentTime + 1.2){
-        const t = this.aNext;
-        if (this.aStep % 4 === 0){
-          const ch = CHORDS[this.aChord % CHORDS.length];
-          ch.forEach(m => this.padNote(m, t, BAR * 1.05, .03));
-          this.padNote(ch[0] - 12, t, BAR * 1.05, .022);
-          this.aChord++;
-        }
-        if (Math.random() < .42){
-          const ch = CHORDS[(this.aChord - 1) % CHORDS.length];
-          const pick = ch[Math.floor(Math.random() * ch.length)] + 12 * (Math.random() < .3 ? 2 : 1);
-          this.tone(mtof(pick), t + Math.random() * .1, 1.6, .045, 'sine');
-        }
-        this.aNext += BAR / 4; this.aStep++;
-      }
-    },
-    stopAmbient(){
-      if (!this.ambientOn) return;
-      this.ambientOn = false;
-      clearInterval(this.aTimer);
-      try { this.vinyl.stop(); } catch(_){}
-    },
-
-    /* ---------- 生日快乐歌（开盒时刻） ---------- */
-    startBirthday(){
-      this.ensure(); this.ctx.resume();
-      if (this.birthdayOn) return;
-      this.birthdayOn = true; this.bNext = this.ctx.currentTime + .1; this.bStep = 0;
-      this.bTimer = setInterval(() => this.scheduleBirthday(), 250);
-      this.scheduleBirthday();
-    },
-    scheduleBirthday(){
-      while (this.bNext < this.ctx.currentTime + .9){
-        const [n, b] = MEL[this.bStep], t = this.bNext, dur = b * this.beat;
-        if (n){
-          this.tone(N[n], t, dur * 1.9, .14);
-          this.tone(N[n] * 2, t, dur * 1.4, .045, 'sine');
-          if (this.bright) this.tone(N[n] * 4, t + .06, dur, .028, 'sine');
-        }
-        if (this.bStep % 7 === 0){
-          const bi = Math.floor(this.bStep / 7) % BASS.length;
-          this.tone(N[BASS[bi]], t, 1.6, .06, 'sine');
-        }
-        if (this.bright && this.bStep % 2 === 0) this.tone(N[ARP[(this.bStep / 2) % 4]], t, .5, .04, 'sine');
-        this.bNext += dur; this.bStep = (this.bStep + 1) % MEL.length;
-      }
-    },
-    goBright(){ this.bright = true; this.beat = .42; },
-
-    /* ---------- 音效 ---------- */
-    sClick(){ const t = this.now(); this.tone(620, t, .07, .05, 'triangle'); },
-    sError(){ const t = this.now(); this.tone(170, t, .22, .09, 'sawtooth'); this.tone(120, t + .08, .22, .07, 'sawtooth'); },
-    sUnlock(){ const t = this.now(); [660, 880, 1320].forEach((f, i) => this.tone(f, t + i * .1, .5, .1)); },
-    sHeart(){ const t = this.now(); this.tone(880, t, .3, .1, 'sine'); this.tone(1318, t + .12, .55, .09, 'sine'); this.tone(1760, t + .24, .7, .05, 'sine'); },
-    sPop(){ const t = this.now(); this.tone(520, t, .09, .09, 'sine', null, 160); },
-    sChime(){ const t = this.now(); [880, 1108, 1318].forEach((f, i) => this.tone(f, t + i * .14, .9, .08, 'sine')); },
-    sBlow(){ const t = this.now(); this.noiseBurst(t, .6, .3, 750); },
-    sMeow(){ const t = this.now(); this.tone(780, t, .14, .09, 'sine', null, 620); this.tone(620, t + .13, .22, .09, 'sine', null, 900); },
-    sPurr(){ const t = this.now(); this.noiseBurst(t, .5, .05, 380); },
-    sSparkle(){ const t = this.now(); [1046, 1318, 1568, 2093].forEach((f, i) => this.tone(f, t + i * .06, .4, .04, 'sine')); },
-    sNeedle(){ const t = this.now(); this.noiseBurst(t, .25, .16, 1600); },
-  };
-
-  window.AudioBox = AudioBox;
+window.BirMusic={startAmbient,stopAmbient,playSong,stopSong,isSongPlaying,noteTone,ding,unlockChime,clickSfx,errSfx,blowSfx,meowSfx,ensure};
 })();
